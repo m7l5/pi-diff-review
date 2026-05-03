@@ -1466,7 +1466,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
               if (cancelled) return;
               if (f.isUntracked) {
                 const entry = stored[f.path];
-                if (entry && entry.hash === f.currentHash && !diffChanged) {
+                if (entry && entry.hash === f.currentHash) {
                   f.reviewed = true;
                   f.stale = false;
                   if (entry.comment) f.comment = entry.comment;
@@ -1495,7 +1495,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
                     endLine: c.hunkEnd,
                   }));
                 }
-              } else if (entry && (entry.hash !== f.currentHash || diffChanged)) {
+              } else if (entry && entry.hash !== f.currentHash) {
                 f.reviewed = false;
                 f.stale = true;
                 if (entry.comment) f.comment = entry.comment;

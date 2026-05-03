@@ -329,6 +329,39 @@ describe("diff-review persistence", () => {
     }
   });
 
+  it("preserves review of unchanged files when another file changes", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "diff-review-staleness-"));
+    try {
+      git(repoDir, "git init -q");
+      git(repoDir, "git config user.email test@example.com");
+      git(repoDir, "git config user.name Test");
+      mkdirSync(join(repoDir, "sub"));
+      writeFileSync(join(repoDir, "a.txt"), "original a\n");
+      writeFileSync(join(repoDir, "sub", "b.txt"), "original b\n");
+      git(repoDir, "git add -A");
+      git(repoDir, "git commit -q -m init");
+
+      // Modify both files
+      writeFileSync(join(repoDir, "a.txt"), "modified a\n");
+      writeFileSync(join(repoDir, "sub", "b.txt"), "modified b\n");
+
+      // Run 1: review both files (Space on each then Esc)
+      const out1 = await runDiffReview(repoDir, [" ", "\t", " ", "\x1b"]);
+      assert.match(out1, /2\/2 reviewed/);
+
+      // Only change b.txt further — a.txt is unchanged
+      writeFileSync(join(repoDir, "sub", "b.txt"), "modified b again\n");
+
+      // Run 2: a.txt should STILL be marked reviewed
+      const out2 = await runDiffReview(repoDir, ["\x1b"]);
+
+      assert.match(out2, /Diff Review — 1\/2 reviewed/, "a.txt should still be reviewed");
+      assert.match(out2, /1 stale/, "only b.txt should be stale");
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
   it("saves a real file hash for newly reviewed tracked files", async () => {
     const repoDir = mkdtempSync(join(tmpdir(), "diff-review-"));
     try {

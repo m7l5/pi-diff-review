@@ -2,6 +2,8 @@
 
 Interactive git diff review inside [Pi](https://github.com/badlogic/pi-mono) — check files as reviewed, leave hunk-level comments, compile review notes, and discuss changes with AI.
 
+![pi-diff-review overlay](assets/diff-review.png)
+
 ## Install
 
 Install directly from GitHub with Pi:

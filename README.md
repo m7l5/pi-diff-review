@@ -4,26 +4,39 @@ Interactive git diff review inside [Pi](https://github.com/badlogic/pi-mono) —
 
 ## Install
 
-```bash
-pi install pi-diff-review
-```
-
-Or manually:
+Install directly from GitHub with Pi:
 
 ```bash
-git clone https://github.com/your-org/pi-diff-review.git ~/.pi/agent/extensions/diff-review
+pi install git:github.com/m7l5/pi-diff-review
 ```
+
+Or, if you prefer SSH:
+
+```bash
+pi install git:git@github.com:m7l5/pi-diff-review
+```
+
+Then run `/diff-review` from inside any git repo.
 
 ## Usage
 
 ```
-/diff-review                        → git diff main...HEAD
+/diff-review                        → git diff HEAD in current Pi folder
 /diff-review HEAD...main            → git diff HEAD...main (what main has)
 /diff-review origin/main            → git diff origin/main
 /diff-review HEAD~5                 → git diff HEAD~5 (last 5 commits)
 /diff-review --cached               → git diff --cached (staged changes)
 /diff-review @~/other-repo          → git diff HEAD in another repo
 /diff-review origin/main @~/repo    → explicit target + repo
+/diff-review HEAD~2...origin/main @~/repo
+```
+
+Argument order is fixed: the diff target comes first, then the optional repo path after `@`.
+The `@repo` part must be last.
+
+```bash
+/diff-review HEAD~2...origin/main @~/.pi/agent/git/github.com/ghoseb/pi-askuserquestion  # works
+/diff-review @~/.pi/agent/git/github.com/ghoseb/pi-askuserquestion HEAD                 # does not work
 ```
 
 ## Keybindings
@@ -38,10 +51,11 @@ git clone https://github.com/your-org/pi-diff-review.git ~/.pi/agent/extensions/
 | `C` / `Enter`      | Compile comments + close   |
 | `v`                | Toggle pending / all files |
 | `/`                | Search files               |
-| `h`                | Select hunk for context    |
 | `g/G`              | First / last file          |
 | `r`                | Reset all reviews          |
 | `Esc`              | Close                      |
+
+In compile mode, use `↑↓` / `j/k` to move between comments and `d`, `Delete`, or `Backspace` to remove the selected comment before injecting.
 
 ## Development
 

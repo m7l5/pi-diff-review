@@ -2,16 +2,22 @@
  * /diff-review — Interactive git diff review inside Pi
  *
  * Opens a full-screen TUI overlay showing git diff <target> organized by file
- * and hunk. Check files as reviewed, leave comments, select hunks, and send
- * selected hunks + a question into the Pi conversation for AI discussion.
+ * and hunk. Check files as reviewed, leave hunk-level comments, and compile
+ * review notes into the Pi conversation.
  *
  * Usage:
- *   /diff-review                    → git diff main...HEAD
+ *   /diff-review                    → git diff HEAD in current Pi folder
  *   /diff-review HEAD...main        → git diff HEAD...main
  *   /diff-review origin/main        → git diff origin/main
  *   /diff-review HEAD~5             → git diff HEAD~5
  *   /diff-review feat/branch        → git diff feat/branch
  *   /diff-review --cached           → git diff --cached
+ *   /diff-review @~/other-repo      → git diff HEAD in another repo
+ *   /diff-review HEAD~2...origin/main @~/repo
+ *
+ * Argument order is fixed: diff target first, then optional repo path after @.
+ * The @repo part must be last. `/diff-review @~/repo HEAD` is intentionally
+ * parsed as a repo path and will not work.
  */
 
 import type { ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
@@ -24,7 +30,7 @@ import { homedir } from "node:os";
 import type { DiffFile, DiffHunk } from "./diff-parser.js";
 import { parseDiff } from "./diff-parser.js";
 import type { ReviewResult } from "./message-format.js";
-import { formatCommentsMessage, formatDiffMessage } from "./message-format.js";
+import { formatCommentsMessage } from "./message-format.js";
 import { slugify, statePath } from "./state.js";
 
 // ─── Internal Types ───────────────────────────────────────
@@ -44,6 +50,17 @@ type ReviewState = {
 };
 
 type Mode = "review" | "comment" | "compile";
+
+type CompileComment =
+  | { file: DiffFile; kind: "file"; text: string }
+  | {
+      file: DiffFile;
+      kind: "hunk";
+      index: number;
+      text: string;
+      startLine: number;
+      endLine: number;
+    };
 
 // ─── Git Helpers ─────────────────────────────────────────
 
@@ -96,13 +113,21 @@ function gitRoot(cwd?: string): string | null {
 }
 
 function gitDiff(target: string, cwd?: string): string {
-  const opts: { encoding: "utf-8"; maxBuffer: number; cwd?: string } = {
+  const opts: { encoding: "utf-8"; maxBuffer: number; cwd?: string; stdio: "pipe" } = {
     encoding: "utf-8",
     maxBuffer: 10 * 1024 * 1024,
+    stdio: "pipe",
   };
   if (cwd) opts.cwd = cwd;
-  // Redirect stderr to suppress "fatal: could not open" for deleted files
-  return execSync(`git diff ${target} 2>/dev/null`, opts);
+  return execSync(`git diff ${target}`, opts);
+}
+
+function gitErrorMessage(error: unknown): string {
+  const stderr = (error as { stderr?: Buffer | string }).stderr;
+  const stdout = (error as { stdout?: Buffer | string }).stdout;
+  const text = stderr || stdout;
+  if (!text) return "";
+  return text.toString().trim().split("\n")[0] || "";
 }
 
 function hasCommits(cwd: string): boolean {
@@ -202,6 +227,7 @@ class DiffReviewPanel {
   // Mode state
   private mode: Mode = "review";
   private commentInput = "";
+  private activeCompileCommentIdx = 0;
   private loading = false;
 
   // Render cache
@@ -270,13 +296,28 @@ class DiffReviewPanel {
     return this.files.filter((f) => f.stale).length;
   }
 
-  private commentedCount(): number {
-    let count = 0;
+  private compileComments(): CompileComment[] {
+    const comments: CompileComment[] = [];
     for (const f of this.files) {
-      if (f.comment) count++;
-      if (f.hunkComments && f.hunkComments.length > 0) count += f.hunkComments.length;
+      if (f.comment) comments.push({ file: f, kind: "file", text: f.comment });
+      if (f.hunkComments) {
+        f.hunkComments.forEach((hc, index) => {
+          comments.push({
+            file: f,
+            kind: "hunk",
+            index,
+            text: hc.text,
+            startLine: hc.startLine,
+            endLine: hc.endLine,
+          });
+        });
+      }
     }
-    return count;
+    return comments;
+  }
+
+  private commentedCount(): number {
+    return this.compileComments().length;
   }
 
   private totalFiles(): number {
@@ -349,11 +390,30 @@ class DiffReviewPanel {
     return Math.max(5, Math.floor(available * 0.4));
   }
 
-  private get maxHunkHeight(): number {
-    const overhead = 12;
-    const available = this.termRows - overhead;
-    if (available < 10) return 8;
-    return Math.max(8, Math.floor(available * 0.55));
+  private renderedFileRows(): number {
+    if (this.files.length === 0) return 0;
+    const vis = this.visibleFiles();
+    if (vis.length === 0 && this.viewMode === "pending") return 2;
+    return Math.min(this.visibleFileRows(), Math.max(0, vis.length - this.fileScroll));
+  }
+
+  private currentCommentLineCount(): number {
+    const f = this.activeFile();
+    if (!f) return 0;
+    let count = f.comment && this.mode !== "comment" ? 1 : 0;
+    const hunk = this.activeHunk();
+    if (hunk && f.hunkComments) {
+      count += f.hunkComments.filter((hc) => hc.hunkId === this.activeHunkIdx).length;
+    }
+    return count;
+  }
+
+  private previewContentRows(commentLineCount = this.currentCommentLineCount()): number {
+    const targetRows = Math.max(10, this.termRows - 2);
+    const rowsBeforePreview = 5 + this.renderedFileRows();
+    const footerRows = this.mode === "comment" ? 5 : 3;
+    const previewRows = Math.max(1, targetRows - rowsBeforePreview - footerRows - commentLineCount);
+    return Math.max(1, previewRows - 2);
   }
 
   private navigateFile(delta: number): void {
@@ -379,7 +439,7 @@ class DiffReviewPanel {
   }
 
   private pageSize(): number {
-    return this.maxHunkHeight - 1;
+    return Math.max(1, this.previewContentRows() - 1);
   }
 
   private fileViews = new Map<string, DisplayLine[]>();
@@ -466,6 +526,7 @@ class DiffReviewPanel {
 
   private navigateHunk(delta: number): void {
     const f = this.activeFile();
+    if (!f) return;
     if (f.hunks.length === 0) {
       this.navigateFile(delta);
       return;
@@ -489,6 +550,7 @@ class DiffReviewPanel {
 
   private jumpToHunkInView(): void {
     const f = this.activeFile();
+    if (!f) return;
     const view = this.fileViews.get(f.path);
     if (!view) return;
     const targetHunkId = this.activeHunkIdx;
@@ -503,6 +565,7 @@ class DiffReviewPanel {
 
   private scrollHunk(delta: number): void {
     const f = this.activeFile();
+    if (!f) return;
     const view = this.fileViews.get(f.path);
     if (!view || view.length === 0) {
       // No hunks — skip to next file
@@ -524,6 +587,7 @@ class DiffReviewPanel {
 
   private toggleReviewed(): void {
     const f = this.activeFile();
+    if (!f) return;
     if (f.reviewed) {
       // Previously reviewed file — Space unmarks it (overrides state)
       f.reviewed = false;
@@ -540,14 +604,6 @@ class DiffReviewPanel {
     }
     this.persistState();
     this.invalidate();
-  }
-
-  private toggleHunkSelected(): void {
-    const h = this.activeHunk();
-    if (h) {
-      h.selected = !h.selected;
-      this.invalidate();
-    }
   }
 
   private resetAll(): void {
@@ -630,6 +686,10 @@ class DiffReviewPanel {
   private enterCompileView(): void {
     if (this.commentedCount() === 0) return;
     this.mode = "compile";
+    this.activeCompileCommentIdx = Math.min(
+      this.activeCompileCommentIdx,
+      Math.max(0, this.commentedCount() - 1),
+    );
     this.invalidate();
   }
 
@@ -649,8 +709,34 @@ class DiffReviewPanel {
     });
   }
 
-  private submitQuestion(): void {
-    // No longer used — Enter is now Compile.
+  private navigateCompileComment(delta: number): void {
+    const count = this.commentedCount();
+    if (count === 0) return;
+    this.activeCompileCommentIdx = (this.activeCompileCommentIdx + delta + count) % count;
+    this.invalidate();
+  }
+
+  private deleteActiveCompileComment(): void {
+    const comments = this.compileComments();
+    const current = comments[this.activeCompileCommentIdx];
+    if (!current) return;
+
+    if (current.kind === "file") {
+      current.file.comment = undefined;
+    } else {
+      current.file.hunkComments?.splice(current.index, 1);
+      if (current.file.hunkComments?.length === 0) current.file.hunkComments = undefined;
+    }
+
+    const count = this.commentedCount();
+    if (count === 0) {
+      this.activeCompileCommentIdx = 0;
+      this.mode = "review";
+    } else {
+      this.activeCompileCommentIdx = Math.min(this.activeCompileCommentIdx, count - 1);
+    }
+    this.persistState();
+    this.invalidate();
   }
 
   persistState(): void {
@@ -712,6 +798,16 @@ class DiffReviewPanel {
 
   // ─── Render ────────────────────────────────────────────
 
+  private finishRender(width: number, lines: string[], footerLines = 3): string[] {
+    const targetRows = Math.max(lines.length, this.termRows - 2);
+    while (lines.length < targetRows) {
+      lines.splice(Math.max(0, lines.length - footerLines), 0, "");
+    }
+    this.cachedWidth = width;
+    this.cachedLines = lines;
+    return lines;
+  }
+
   render(width: number): string[] {
     if (this.cachedLines.length > 0 && this.cachedWidth === width) {
       return this.cachedLines;
@@ -736,9 +832,7 @@ class DiffReviewPanel {
       }
       add("");
       add(th.fg("accent", "─".repeat(width)));
-      this.cachedWidth = width;
-      this.cachedLines = lines;
-      return lines;
+      return this.finishRender(width, lines, 1);
     }
 
     // ── Top border + status bar ──────────────────────────
@@ -773,7 +867,9 @@ class DiffReviewPanel {
     }
     add(" " + th.fg(this.searchMode ? "accent" : "dim", modeLine));
 
-    if (vis.length === 0 && this.viewMode === "pending") {
+    if (this.files.length === 0) {
+      // No file-list rows; give the space to the preview/empty-state area instead.
+    } else if (vis.length === 0 && this.viewMode === "pending") {
       add(" " + th.fg("success", "✔ All files reviewed!"));
       add(" " + th.fg("dim", "  Press [v] to view all files, or press [r] to reset"));
     } else {
@@ -849,40 +945,76 @@ class DiffReviewPanel {
     if (this.mode === "compile") {
       add(" " + th.fg("accent", th.bold("Review Comments")));
       add("");
-      const commentedFiles = this.files.filter((f) => f.comment);
-      for (const f of commentedFiles) {
-        add(" " + th.fg("text", f.path));
-        add(" " + th.fg("muted", `> ${f.comment}`));
+      const comments = this.compileComments();
+      for (let i = 0; i < comments.length; i++) {
+        const comment = comments[i];
+        const arrow = i === this.activeCompileCommentIdx ? th.fg("accent", "►") : " ";
+        const lineInfo =
+          comment.kind === "hunk" && comment.startLine > 0
+            ? ` (L${comment.startLine}-${comment.endLine})`
+            : "";
+        add(`${arrow} ${th.fg("text", `${comment.file.path}${lineInfo}`)}`);
+        add("  " + th.fg("muted", `> ${comment.text}`));
         add("");
       }
       add(th.fg("border", borderChar.repeat(width)));
-      add(" " + th.fg("dim", "[c] back to review  [C] inject all comments into chat as summary"));
+      add(" " + th.fg("dim", "[↑↓/j/k] move  [d/Del] delete  [c/Esc] back  [C] inject comments"));
       add(th.fg("border", borderChar.repeat(width)));
 
-      this.cachedWidth = width;
-      this.cachedLines = lines;
-      return lines;
+      return this.finishRender(width, lines, 2);
+    }
+
+    if (this.files.length === 0) {
+      add(" " + th.fg("success", "✔ No changes found"));
+      add(" " + th.fg("dim", `  git diff ${this.target} returned no files`));
+      add("");
+      add(th.fg("border", borderChar.repeat(width)));
+      add("");
+      add(" " + th.fg("dim", "[Esc] close"));
+      add(th.fg("border", borderChar.repeat(width)));
+
+      return this.finishRender(width, lines);
     }
 
     // ── File view ────────────────────────────────────────
     const f = this.activeFile();
     const view = this.fileViews.get(f.path);
+    const hunk = this.activeHunk();
+    const commentLines: string[] = [];
+    if (f.comment && this.mode !== "comment") {
+      commentLines.push(" " + th.fg("muted", `NOTE: ${f.comment}`));
+    }
+    if (hunk && f.hunkComments) {
+      const hunkComms = f.hunkComments.filter((hc) => hc.hunkId === this.activeHunkIdx);
+      for (const hc of hunkComms) {
+        const lineInfo = hc.startLine > 0 ? ` (L${hc.startLine}-${hc.endLine})` : "";
+        commentLines.push(" " + th.fg("muted", `💬${lineInfo}: ${hc.text}`));
+      }
+    }
+
+    const targetRows = Math.max(lines.length, this.termRows - 2);
+    const footerRows = this.mode === "comment" ? 5 : 3;
+    const previewRows = Math.max(1, targetRows - lines.length - footerRows - commentLines.length);
+    const previewStart = lines.length;
+    const padPreview = () => {
+      while (lines.length - previewStart < previewRows) add(" " + th.fg("dim", "~"));
+    };
 
     if (f.isBinary) {
       add(" " + th.fg("muted", "Binary file — cannot display diff"));
-      add("");
+      padPreview();
     } else if (view && view.length > 0) {
-      // Current hunk indicator
-      const hunk = this.activeHunk();
-      if (hunk) {
+      let remaining = previewRows;
+      if (hunk && remaining > 0) {
         const hunkHeader = `Hunk ${this.activeHunkIdx + 1}/${f.hunks.length} — ${hunk.header} ${f.path}`;
         add(" " + th.fg("accent", truncateToWidth(hunkHeader, width - 1)));
+        remaining--;
       }
 
-      // Scrollable file lines — always render maxHunkHeight rows for consistent height
-      const maxHunkHeight = this.maxHunkHeight;
+      const indicatorRows = remaining > 1 ? 1 : 0;
+      const contentRows = Math.max(0, remaining - indicatorRows);
       const start = this.fileLineOffset;
-      const end = Math.min(start + maxHunkHeight, view.length);
+      const end = Math.min(start + contentRows, view.length);
 
       for (let i = start; i < end; i++) {
         const dl = view[i];
@@ -899,50 +1031,35 @@ class DiffReviewPanel {
           styled = th.fg("toolDiffContext", dl.text);
         }
 
-        // Selected hunk background
-        const hunkSelected = dl.hunkId !== undefined && f.hunks[dl.hunkId]?.selected;
-        if (hunkSelected && th.bg) {
-          styled = th.bg("selectedBg", styled);
-        }
-
         add(" " + truncateToWidth(styled, width - 1));
       }
 
-      // Pad to maxHunkHeight if the view is shorter
-      for (let i = end; i < start + maxHunkHeight; i++) {
+      while (lines.length - previewStart < previewRows - indicatorRows) {
         add(" " + th.fg("dim", "~"));
       }
 
-      // Scroll indicator
-      if (view.length > maxHunkHeight) {
-        const pct =
-          this.fileLineOffset > 0
-            ? Math.round((this.fileLineOffset / (view.length - maxHunkHeight)) * 100)
-            : 0;
-        add(" " + th.fg("dim", `${pct}%`));
+      if (indicatorRows > 0) {
+        if (view.length > contentRows) {
+          const maxOffset = Math.max(1, view.length - contentRows);
+          const pct =
+            this.fileLineOffset > 0 ? Math.round((this.fileLineOffset / maxOffset) * 100) : 0;
+          add(" " + th.fg("dim", `${pct}%`));
+        } else {
+          add(" " + th.fg("dim", ""));
+        }
       }
     } else if (f.hunks.length === 0 && (!view || view.length === 0)) {
       add(" " + th.fg("muted", "No content changes (mode/permissions only)"));
+      padPreview();
     } else if (view && view.length === 0) {
       add(" " + th.fg("muted", "No content changes (mode/permissions only)"));
+      padPreview();
     } else {
       add(" " + th.fg("muted", "Loading file..."));
+      padPreview();
     }
-    add("");
 
-    // ── Comment preview ──────────────────────────────────
-    const hunk = this.activeHunk();
-    if (f.comment && this.mode !== "comment") {
-      add(" " + th.fg("muted", `NOTE: ${f.comment}`));
-    }
-    if (hunk && f.hunkComments) {
-      const hunkComms = f.hunkComments.filter((hc) => hc.hunkId === this.activeHunkIdx);
-      for (const hc of hunkComms) {
-        const lineInfo = hc.startLine > 0 ? ` (L${hc.startLine}-${hc.endLine})` : "";
-        add(" " + th.fg("muted", `💬${lineInfo}: ${hc.text}`));
-      }
-    }
-    add("");
+    for (const line of commentLines) add(line);
 
     // ── Separator ────────────────────────────────────────
     add(th.fg("border", borderChar.repeat(width)));
@@ -954,8 +1071,6 @@ class DiffReviewPanel {
       add(" " + th.fg("text", `> ${this.commentInput}${cursor}`));
     }
 
-    add("");
-
     // ── Help bar ─────────────────────────────────────────
     if (this.mode === "comment") {
       add(" " + th.fg("dim", "[Enter] save  [Esc] cancel"));
@@ -964,7 +1079,7 @@ class DiffReviewPanel {
         " " +
           th.fg(
             "dim",
-            "[Tab] next  [j/k] hunk  [↑↓/PgUp/PgDn] scroll  [Space] ✓  [c] comment  [C] compile  [v] mode  [/] search  [h] select  [r] reset  [Esc] close",
+            "[Tab] next  [j/k] hunk  [↑↓/PgUp/PgDn] scroll  [Space] ✓  [c] comment  [C] compile  [v] mode  [/] search  [r] reset  [Esc] close",
           ),
       );
     }
@@ -972,9 +1087,7 @@ class DiffReviewPanel {
     // ── Bottom border ────────────────────────────────────
     add(th.fg("border", borderChar.repeat(width)));
 
-    this.cachedWidth = width;
-    this.cachedLines = lines;
-    return lines;
+    return this.finishRender(width, lines, this.mode === "comment" ? 5 : 3);
   }
 
   // ─── Input Handling ────────────────────────────────────
@@ -995,6 +1108,12 @@ class DiffReviewPanel {
         this.exitCompileView();
       } else if (data === "C" || matchesKey(data, Key.shift("c"))) {
         this.injectComments();
+      } else if (data === "j" || matchesKey(data, Key.down)) {
+        this.navigateCompileComment(1);
+      } else if (data === "k" || matchesKey(data, Key.up)) {
+        this.navigateCompileComment(-1);
+      } else if (data === "d" || matchesKey(data, Key.delete) || matchesKey(data, Key.backspace)) {
+        this.deleteActiveCompileComment();
       }
       return;
     }
@@ -1111,10 +1230,6 @@ class DiffReviewPanel {
       this.enterCompileView();
       return;
     }
-    if (data === "h") {
-      this.toggleHunkSelected();
-      return;
-    }
     if (data === "g") {
       this.goToStart();
       return;
@@ -1183,14 +1298,17 @@ class DiffReviewPanel {
 
 export default function diffReviewExtension(pi: ExtensionAPI) {
   pi.registerCommand("diff-review", {
-    description: "Review git diff interactively — check files, select hunks, discuss with AI",
+    description: "Review git diff interactively — check files, comment on hunks, compile notes",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) {
         ctx.ui.notify("diff-review requires interactive mode", "error");
         return;
       }
 
-      // Parse args: "<diff-target> @<repo-path>"
+      // Parse args: "<diff-target> @<repo-path>".
+      // Argument order is fixed: the diff target comes first, and the optional
+      // @repo path must be last. This keeps targets like stash@{0} usable by
+      // splitting on the final @, but means "@repo HEAD" is not supported.
       const rawArgs = (args || "").trim();
       const atIndex = rawArgs.lastIndexOf("@");
       let target: string;
@@ -1204,7 +1322,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
           repoPath = resolvePath(relPath, ctx.cwd);
         }
       } else {
-        target = rawArgs || "main...HEAD";
+        target = rawArgs || "HEAD";
       }
 
       // Validate git repo and normalize to the reviewed repo root.
@@ -1248,8 +1366,12 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
             let raw: string;
             try {
               raw = hasCommits(repoDir) ? gitDiff(diffTarget, repoDir) : "";
-            } catch {
-              ctx.ui.notify(`git diff failed for target: ${diffTarget}`, "error");
+            } catch (error) {
+              const detail = gitErrorMessage(error);
+              const message = detail
+                ? `git diff failed for target: ${diffTarget} — ${detail}`
+                : `git diff failed for target: ${diffTarget}`;
+              ctx.ui.notify(message, "error");
               done(null);
               return;
             }
@@ -1263,13 +1385,9 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
             if (cancelled) return;
 
             // Step 3: get untracked files
-            const untracked = getUntrackedFiles(repoDir);
+            const untracked = diffTarget === "--cached" ? [] : getUntrackedFiles(repoDir);
             const files = diffFiles.concat(untracked);
 
-            if (files.length === 0) {
-              done(null);
-              return;
-            }
             if (cancelled) return;
 
             // Step 4: load review state + compute hashes (batched)
@@ -1383,10 +1501,8 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
         return;
       }
 
-      // Inject selected hunks + question
-      const msg = formatDiffMessage(result);
-      pi.sendUserMessage(msg);
-      ctx.ui.notify("Hunks sent to AI for review", "info");
+      pi.sendUserMessage(result.question);
+      ctx.ui.notify("Comments injected into chat", "info");
     },
   });
 }

@@ -28,9 +28,9 @@ Then run `/diff-review` from inside any git repo.
 /diff-review origin/main            → git diff origin/main
 /diff-review HEAD~5                 → git diff HEAD~5 (last 5 commits)
 /diff-review --cached               → git diff --cached (staged changes)
-/diff-review ~/other-repo           → git diff HEAD in another repo
-/diff-review ~/repo origin/main     → git diff origin/main in another repo
-/diff-review ~/repo HEAD~2...origin/main
+/diff-review @~/other-repo          → git diff HEAD in another repo
+/diff-review @~/repo origin/main    → git diff origin/main in another repo
+/diff-review @~/repo HEAD~2...origin/main
 ```
 
 ## Keybindings

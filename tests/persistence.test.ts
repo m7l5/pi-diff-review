@@ -103,6 +103,7 @@ describe("diff-review persistence", () => {
       const lines = output.split("\n");
 
       assert.match(output, /a\.txt/);
+      assert.match(output, /Diff Review — 1\/1 reviewed/);
       assert.match(lines.at(-2) || "", /\[Tab\] next/);
       assert.equal(existsSync(statePath(slugify("HEAD"), repoDir)), true);
       assert.equal(existsSync(statePath(slugify("main...HEAD"), repoDir)), false);
@@ -185,6 +186,27 @@ describe("diff-review persistence", () => {
 
       assert.match(output, /a\.txt/);
       assert.match(output, /\[U\]/);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("shows untracked binary files without rendering raw contents", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "diff-review-untracked-binary-"));
+    try {
+      git(repoDir, "git init -q");
+      writeFileSync(
+        join(repoDir, "image.png"),
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x49, 0x48, 0x44, 0x52]),
+      );
+
+      const output = await runDiffReview(repoDir, ["\x1b"]);
+
+      assert.match(output, /image\.png/);
+      assert.match(output, /\[ \] \[U\] image\.png  \(binary\)/);
+      assert.match(output, /Binary file — cannot display diff/);
+      assert.doesNotMatch(output, /\[▶\]/);
+      assert.doesNotMatch(output, /IHDR/);
     } finally {
       rmSync(repoDir, { recursive: true, force: true });
     }

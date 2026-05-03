@@ -123,6 +123,24 @@ function readFileLines(filePath: string, repoDir: string): string[] | null {
   }
 }
 
+function isBinaryFile(filePath: string, repoDir: string): boolean {
+  try {
+    const bytes = readFileSync(join(repoDir, filePath));
+    const sample = bytes.subarray(0, Math.min(bytes.length, 8000));
+    if (sample.includes(0)) return true;
+
+    let controlBytes = 0;
+    for (const byte of sample) {
+      if ((byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) || byte === 127) {
+        controlBytes++;
+      }
+    }
+    return sample.length > 0 && controlBytes / sample.length > 0.1;
+  } catch {
+    return false;
+  }
+}
+
 type DisplayLine = {
   text: string;
   type: "addition" | "removal" | "context" | "gap" | "hunkHeader";
@@ -316,7 +334,7 @@ class DiffReviewPanel {
   // ─── Computed ──────────────────────────────────────────
 
   private reviewedCount(): number {
-    return this.files.filter((f) => f.reviewed).length;
+    return this.files.filter((f) => f.reviewed || f.justReviewed).length;
   }
 
   private staleCount(): number {
@@ -477,14 +495,13 @@ class DiffReviewPanel {
     if (!f || f.isBinary || this.fileViews.has(f.path)) return;
 
     if (f.isUntracked && !f.hunks.length) {
-      const fileLines = readFileLines(f.path, this.repoDir);
-      if (!fileLines) return;
-      // Binary detection: null bytes, ANSI escapes, or single line > 10K chars
-      const isProbablyBinary = fileLines.length === 1 && fileLines[0].length > 10000;
-      if (isProbablyBinary) {
+      if (isBinaryFile(f.path, this.repoDir)) {
         f.isBinary = true;
         return;
       }
+
+      const fileLines = readFileLines(f.path, this.repoDir);
+      if (!fileLines) return;
       const lines: string[] = [`@@ -0,0 +1,${fileLines.length} @@`];
       for (const l of fileLines) lines.push(`+${l}`);
       f.stats = { added: fileLines.length, removed: 0 };
@@ -912,9 +929,7 @@ class DiffReviewPanel {
 
         // Checkmark
         let check: string;
-        if (f.isBinary) {
-          check = th.fg("muted", "▶");
-        } else if (f.reviewed && f.stale) {
+        if (f.reviewed && f.stale) {
           check = th.fg("warning", "⚠");
         } else if (f.reviewed || f.justReviewed) {
           check = th.fg("muted", "✓");

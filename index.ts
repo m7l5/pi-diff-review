@@ -1126,7 +1126,7 @@ class DiffReviewPanel {
         " " +
           th.fg(
             "dim",
-            "[Tab] next  [j/k] hunk  [↑↓/PgUp/PgDn] scroll  [Space] ✓  [c] comment  [C] compile  [v] mode  [/] search  [r] reset  [Esc] close",
+            "[Tab] file  [j/k] hunk  [↑↓/PgUp/PgDn] scroll  [Space] ✓  [c] comment  [C] compile  [v] mode  [/] search  [r] reset  [Esc] close",
           ),
       );
     }

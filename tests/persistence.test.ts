@@ -104,7 +104,7 @@ describe("diff-review persistence", () => {
 
       assert.match(output, /a\.txt/);
       assert.match(output, /Diff Review — 1\/1 reviewed/);
-      assert.match(lines.at(-2) || "", /\[Tab\] next/);
+      assert.match(lines.at(-2) || "", /\[Tab\] file/);
       assert.equal(existsSync(statePath(slugify("HEAD"), repoDir)), true);
       assert.equal(existsSync(statePath(slugify("main...HEAD"), repoDir)), false);
     } finally {

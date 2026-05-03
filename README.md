@@ -31,9 +31,6 @@ Then run `/diff-review` from inside any git repo.
 /diff-review HEAD~2...origin/main @~/repo
 ```
 
-Argument order is fixed: the diff target comes first, then the optional repo path after `@`.
-The `@repo` part must be last.
-
 ```bash
 /diff-review HEAD~2...origin/main @~/.pi/agent/git/github.com/ghoseb/pi-askuserquestion  # works
 /diff-review @~/.pi/agent/git/github.com/ghoseb/pi-askuserquestion HEAD                 # does not work

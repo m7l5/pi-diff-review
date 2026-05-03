@@ -276,6 +276,7 @@ class DiffReviewPanel {
     this.diffRaw = diffRaw;
     if (files.length > 0) {
       this.buildFileView();
+      this.jumpToHunkInView();
     }
     this.invalidate();
   }
@@ -435,6 +436,7 @@ class DiffReviewPanel {
     this.fileLineOffset = 0;
     this.clampFileScroll();
     this.buildFileView();
+    this.jumpToHunkInView();
     this.invalidate();
   }
 
@@ -537,10 +539,12 @@ class DiffReviewPanel {
       this.navigateFile(-1);
       const prev = this.activeFile();
       this.activeHunkIdx = Math.max(0, prev.hunks.length - 1);
+      this.jumpToHunkInView();
     } else if (this.activeHunkIdx + delta >= f.hunks.length) {
       // Wrap to next visible file, first hunk
       this.navigateFile(1);
       this.activeHunkIdx = 0;
+      this.jumpToHunkInView();
     } else {
       this.activeHunkIdx += delta;
       this.jumpToHunkInView();
@@ -623,6 +627,7 @@ class DiffReviewPanel {
     this.activeHunkIdx = 0;
     this.fileLineOffset = 0;
     this.fileScroll = 0;
+    this.jumpToHunkInView();
     this.invalidate();
   }
 
@@ -634,6 +639,7 @@ class DiffReviewPanel {
     this.activeHunkIdx = Math.max(0, last.hunks.length - 1);
     this.fileLineOffset = 0;
     this.clampFileScroll();
+    this.jumpToHunkInView();
     this.invalidate();
   }
 

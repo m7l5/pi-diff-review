@@ -12,12 +12,9 @@
  *   /diff-review HEAD~5             → git diff HEAD~5
  *   /diff-review feat/branch        → git diff feat/branch
  *   /diff-review --cached           → git diff --cached
- *   /diff-review @~/other-repo      → git diff HEAD in another repo
- *   /diff-review HEAD~2...origin/main @~/repo
- *
- * Argument order is fixed: diff target first, then optional repo path after @.
- * The @repo part must be last. `/diff-review @~/repo HEAD` is intentionally
- * parsed as a repo path and will not work.
+ *   /diff-review ~/other-repo       → git diff HEAD in another repo
+ *   /diff-review ~/repo origin/main → git diff origin/main in another repo
+ *   /diff-review ~/repo HEAD~2...origin/main
  */
 
 import type { ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
@@ -78,6 +75,35 @@ function resolvePath(raw: string, cwd: string): string {
   if (raw.startsWith("/")) return raw;
   // Relative path — resolve from cwd
   return join(cwd, raw);
+}
+
+type ParsedArgs = { target: string; repoPath?: string };
+
+function parseCommandArgs(rawArgs: string, cwd: string): ParsedArgs {
+  if (!rawArgs) return { target: "HEAD" };
+
+  const firstMatch = rawArgs.match(/^(\S+)(?:\s+(.+))?$/);
+  if (firstMatch) {
+    const first = firstMatch[1];
+    const rest = firstMatch[2]?.trim();
+    const firstPath = first.startsWith("@") ? first.slice(1) : first;
+    const repoPath = resolvePath(firstPath, cwd);
+    if (gitRoot(repoPath)) {
+      return { target: rest || "HEAD", repoPath };
+    }
+  }
+
+  // Legacy syntax: "<diff-target> @<repo-path>". Keep this for existing users,
+  // but only split on whitespace + @ so refs like stash@{0} remain valid targets.
+  const legacyMatch = rawArgs.match(/^(.*?)\s+@(.+)$/);
+  if (legacyMatch) {
+    return {
+      target: legacyMatch[1].trim() || "HEAD",
+      repoPath: resolvePath(legacyMatch[2].trim(), cwd),
+    };
+  }
+
+  return { target: rawArgs };
 }
 
 function readFileLines(filePath: string, repoDir: string): string[] | null {
@@ -1311,25 +1337,9 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
         return;
       }
 
-      // Parse args: "<diff-target> @<repo-path>".
-      // Argument order is fixed: the diff target comes first, and the optional
-      // @repo path must be last. This keeps targets like stash@{0} usable by
-      // splitting on the final @, but means "@repo HEAD" is not supported.
-      const rawArgs = (args || "").trim();
-      const atIndex = rawArgs.lastIndexOf("@");
-      let target: string;
-      let repoPath: string | undefined;
-
-      if (atIndex >= 0) {
-        // @ found — split: everything before @ is the diff target, after @ is the repo path
-        target = rawArgs.slice(0, atIndex).trim() || "HEAD";
-        const relPath = rawArgs.slice(atIndex + 1).trim();
-        if (relPath) {
-          repoPath = resolvePath(relPath, ctx.cwd);
-        }
-      } else {
-        target = rawArgs || "HEAD";
-      }
+      // Preferred syntax: "<repo-path> <diff-target>".
+      // Legacy "<diff-target> @<repo-path>" is still accepted.
+      const { target, repoPath } = parseCommandArgs((args || "").trim(), ctx.cwd);
 
       // Validate git repo and normalize to the reviewed repo root.
       const requestedRepoDir = repoPath || ctx.cwd;

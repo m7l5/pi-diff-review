@@ -204,7 +204,12 @@ describe("diff-review persistence", () => {
       git(reviewedRoot, "git commit -q -m init");
       writeFileSync(join(reviewedRoot, "sub", "a.txt"), "one\ntwo\n");
 
-      await runDiffReview(join(reviewedRoot, "sub"), [" ", "\x1b"], cwdRepo);
+      await runDiffReview(
+        join(reviewedRoot, "sub"),
+        [" ", "\x1b"],
+        cwdRepo,
+        `${join(reviewedRoot, "sub")} HEAD`,
+      );
 
       const expectedState = statePath(slugify("HEAD"), reviewedRoot);
       assert.equal(existsSync(expectedState), true);

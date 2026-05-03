@@ -1,0 +1,33 @@
+{
+  "name": "pi-diff-review",
+  "version": "1.0.0",
+  "description": "Interactive git diff review inside Pi — check files, leave hunk-level comments, and discuss changes with AI",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "git",
+    "diff",
+    "review"
+  ],
+  "license": "Apache-2.0",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsgo --project tsconfig.json",
+    "typecheck": "tsgo --noEmit --project tsconfig.json",
+    "test": "pnpm build && node --test dist/tests/*.test.js",
+    "lint": "oxlint index.ts diff-parser.ts state.ts message-format.ts",
+    "format": "oxfmt index.ts diff-parser.ts state.ts message-format.ts tests/*.ts"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.72.1",
+    "@mariozechner/pi-tui": "^0.72.1",
+    "@types/node": "latest",
+    "@typescript/native-preview": "7.0.0-dev.20260502.1",
+    "oxfmt": "latest",
+    "oxlint": "latest"
+  }
+}

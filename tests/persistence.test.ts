@@ -104,9 +104,37 @@ describe("diff-review persistence", () => {
 
       assert.match(output, /a\.txt/);
       assert.match(output, /Diff Review — 1\/1 reviewed/);
+      assert.match(output, /L1-2/);
       assert.match(lines.at(-2) || "", /\[Tab\] file/);
       assert.equal(existsSync(statePath(slugify("HEAD"), repoDir)), true);
       assert.equal(existsSync(statePath(slugify("main...HEAD"), repoDir)), false);
+    } finally {
+      rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it("shows the visible line range next to the scroll percent", async () => {
+    const repoDir = mkdtempSync(join(tmpdir(), "diff-review-line-range-"));
+    try {
+      git(repoDir, "git init -q");
+      git(repoDir, "git config user.email test@example.com");
+      git(repoDir, "git config user.name Test");
+      writeFileSync(
+        join(repoDir, "a.txt"),
+        Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n") + "\n",
+      );
+      git(repoDir, "git add a.txt");
+      git(repoDir, "git commit -q -m init");
+      writeFileSync(
+        join(repoDir, "a.txt"),
+        Array.from({ length: 100 }, (_, index) =>
+          index === 99 ? "changed line 100" : `line ${index + 1}`,
+        ).join("\n") + "\n",
+      );
+
+      const output = await runDiffReview(repoDir, ["\x1b"]);
+
+      assert.match(output, /L\d+-\d+ · \d+%/);
     } finally {
       rmSync(repoDir, { recursive: true, force: true });
     }

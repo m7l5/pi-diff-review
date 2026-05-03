@@ -106,18 +106,26 @@ function parseCommandArgs(rawArgs: string, cwd: string): ParsedArgs {
   return { target: rawArgs };
 }
 
+function splitLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
 function readFileLines(filePath: string, repoDir: string): string[] | null {
   try {
     // Try working tree first, fall back to git show HEAD
     const absPath = join(repoDir, filePath);
     if (existsSync(absPath)) {
-      return readFileSync(absPath, "utf-8").split("\n");
+      return splitLines(readFileSync(absPath, "utf-8"));
     }
     // Deleted file — show from HEAD
-    return execSync(`git show HEAD:"${filePath}" 2>/dev/null`, {
-      encoding: "utf-8",
-      cwd: repoDir,
-    }).split("\n");
+    return splitLines(
+      execSync(`git show HEAD:"${filePath}" 2>/dev/null`, {
+        encoding: "utf-8",
+        cwd: repoDir,
+      }),
+    );
   } catch {
     return null;
   }
@@ -145,6 +153,7 @@ type DisplayLine = {
   text: string;
   type: "addition" | "removal" | "context" | "gap" | "hunkHeader";
   hunkId?: number;
+  lineNo?: number;
 };
 
 function gitRoot(cwd?: string): string | null {
@@ -461,6 +470,18 @@ class DiffReviewPanel {
     return Math.max(1, previewRows - 2);
   }
 
+  private visibleLineRange(view: DisplayLine[], start: number, end: number): string {
+    const visibleLineNumbers = view
+      .slice(start, end)
+      .map((line) => line.lineNo)
+      .filter((lineNo): lineNo is number => lineNo !== undefined);
+    if (visibleLineNumbers.length === 0) return "";
+
+    const first = visibleLineNumbers[0];
+    const last = visibleLineNumbers[visibleLineNumbers.length - 1];
+    return first === last ? `L${first}` : `L${first}-${last}`;
+  }
+
   private navigateFile(delta: number): void {
     const vis = this.visibleFiles();
     if (vis.length === 0) return;
@@ -537,22 +558,31 @@ class DiffReviewPanel {
       // Fill gap between last hunk end and this hunk start
       if (newStart > lastNewEnd) {
         for (let i = lastNewEnd - 1; i < newStart - 1 && i < fileLines.length; i++) {
-          display.push({ text: fileLines[i] || "", type: "gap" });
+          display.push({ text: fileLines[i] || "", type: "gap", lineNo: i + 1 });
         }
       }
 
       // Add hunk header
-      display.push({ text: hunk.header, type: "hunkHeader", hunkId: hunk.id });
+      display.push({ text: hunk.header, type: "hunkHeader", hunkId: hunk.id, lineNo: newStart });
+
+      let oldLine = parseInt(match[1]);
+      let newLine = newStart;
 
       // Add hunk lines
       for (let li = 1; li < hunk.lines.length; li++) {
         const line = hunk.lines[li];
         if (line.startsWith("+") && !line.startsWith("+++")) {
-          display.push({ text: line, type: "addition", hunkId: hunk.id });
+          display.push({ text: line, type: "addition", hunkId: hunk.id, lineNo: newLine });
+          newLine++;
         } else if (line.startsWith("-") && !line.startsWith("---")) {
-          display.push({ text: line, type: "removal", hunkId: hunk.id });
-        } else {
+          display.push({ text: line, type: "removal", hunkId: hunk.id, lineNo: oldLine });
+          oldLine++;
+        } else if (line.startsWith("\\") || line === "") {
           display.push({ text: line, type: "context", hunkId: hunk.id });
+        } else {
+          display.push({ text: line, type: "context", hunkId: hunk.id, lineNo: newLine });
+          oldLine++;
+          newLine++;
         }
       }
 
@@ -562,7 +592,7 @@ class DiffReviewPanel {
     // Fill gap after last hunk
     if (lastNewEnd <= fileLines.length) {
       for (let i = lastNewEnd - 1; i < fileLines.length; i++) {
-        display.push({ text: fileLines[i] || "", type: "gap" });
+        display.push({ text: fileLines[i] || "", type: "gap", lineNo: i + 1 });
       }
     }
 
@@ -1086,14 +1116,19 @@ class DiffReviewPanel {
       }
 
       if (indicatorRows > 0) {
-        if (view.length > contentRows) {
-          const maxOffset = Math.max(1, view.length - contentRows);
-          const pct =
-            this.fileLineOffset > 0 ? Math.round((this.fileLineOffset / maxOffset) * 100) : 0;
-          add(" " + th.fg("dim", `${pct}%`));
-        } else {
-          add(" " + th.fg("dim", ""));
-        }
+        const lineRange = this.visibleLineRange(view, start, end);
+        const scrollPct =
+          view.length > contentRows
+            ? (() => {
+                const maxOffset = Math.max(1, view.length - contentRows);
+                const pct =
+                  this.fileLineOffset > 0
+                    ? Math.round((this.fileLineOffset / maxOffset) * 100)
+                    : 0;
+                return `${pct}%`;
+              })()
+            : "";
+        add(" " + th.fg("dim", [lineRange, scrollPct].filter(Boolean).join(" · ")));
       }
     } else if (f.hunks.length === 0 && (!view || view.length === 0)) {
       add(" " + th.fg("muted", "No content changes (mode/permissions only)"));

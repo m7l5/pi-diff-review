@@ -1205,7 +1205,9 @@ class DiffReviewPanel {
           styled = th.fg("toolDiffContext", dl.text);
         }
 
-        add(" " + truncateToWidth(styled, width - 1));
+        const isActiveLine = i === this.fileLineOffset;
+        const prefix = isActiveLine ? th.fg("accent", ">") : " ";
+        add(prefix + truncateToWidth(styled, width - 1));
       }
 
       while (lines.length - previewStart < previewRows - indicatorRows) {

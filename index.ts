@@ -1122,9 +1122,7 @@ class DiffReviewPanel {
             ? (() => {
                 const maxOffset = Math.max(1, view.length - contentRows);
                 const pct =
-                  this.fileLineOffset > 0
-                    ? Math.round((this.fileLineOffset / maxOffset) * 100)
-                    : 0;
+                  this.fileLineOffset > 0 ? Math.round((this.fileLineOffset / maxOffset) * 100) : 0;
                 return `${pct}%`;
               })()
             : "";

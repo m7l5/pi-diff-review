@@ -1,6 +1,6 @@
 {
   "name": "pi-diff-review",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Interactive git diff review inside Pi — check files, leave hunk-level comments, and discuss changes with AI",
   "keywords": [
     "pi-package",
@@ -28,6 +28,7 @@
     "@types/node": "latest",
     "@typescript/native-preview": "7.0.0-dev.20260502.1",
     "oxfmt": "latest",
-    "oxlint": "latest"
+    "oxlint": "latest",
+    "typescript": "^6.0.3"
   }
 }

@@ -29,6 +29,8 @@ import { parseDiff } from "./diff-parser.js";
 import type { ReviewResult } from "./message-format.js";
 import { formatCommentsMessage } from "./message-format.js";
 import { slugify, statePath } from "./state.js";
+import { LspClient } from "./lsp-client.js";
+import { DefinitionOverlay } from "./lsp-overlay.js";
 
 // ─── Internal Types ───────────────────────────────────────
 
@@ -271,6 +273,15 @@ class DiffReviewPanel {
   private searchFilter = "";
   private searchMode = false;
 
+  // LSP state
+  private lsp?: LspClient;
+  private overlay?: DefinitionOverlay;
+
+  // LSP picker state (diff view)
+  private pickerMode = false;
+  private pickerItems: string[] = [];
+  private pickerIndex = 0;
+
   // Navigation state
   private activeFileIdx = 0;
   private activeHunkIdx = 0;
@@ -299,10 +310,11 @@ class DiffReviewPanel {
     diffRaw: string;
     slug: string;
     theme: Theme;
-    tui: { terminal: { rows: number } };
+    tui: { terminal: { rows: number }; requestRender: () => void };
     done: (result: ReviewResult | null) => void;
+    lsp?: LspClient;
   }) {
-    const { files, target, repoDir, diffRaw, slug, theme, tui, done } = options;
+    const { files, target, repoDir, diffRaw, slug, theme, tui, done, lsp } = options;
     this.files = files;
     this.target = target;
     this.repoDir = repoDir;
@@ -311,6 +323,10 @@ class DiffReviewPanel {
     this.theme = theme;
     this.tui = tui;
     this.done = done;
+    this.lsp = lsp;
+    if (lsp) {
+      this.overlay = new DefinitionOverlay({ theme, tui, lsp, repoDir });
+    }
     // Views are lazy-built when user Tabs to a file
   }
 
@@ -716,6 +732,75 @@ class DiffReviewPanel {
     this.invalidate();
   }
 
+  private definitionTarget(): string {
+    const f = this.activeFile();
+    if (!f || f.isBinary || !this.lsp) return "";
+    const view = this.fileViews.get(f.path);
+    if (!view) return "";
+    const dl = view[this.fileLineOffset];
+    if (!dl || !dl.lineNo) return "";
+    const fileLines = readFileLines(f.path, this.repoDir);
+    if (!fileLines) return "";
+    const actualLine = fileLines[dl.lineNo - 1];
+    if (!actualLine) return "";
+    const m = actualLine.match(/[a-zA-Z_$][a-zA-Z0-9_$]*/);
+    return m ? m[0] : "";
+  }
+
+  private enterPickerMode(): void {
+    const f = this.activeFile();
+    if (!f || f.isBinary || !this.lsp) return;
+
+    const view = this.fileViews.get(f.path);
+    if (!view) return;
+
+    const dl = view[this.fileLineOffset];
+    if (!dl || !dl.lineNo) return;
+
+    const fileLines = readFileLines(f.path, this.repoDir);
+    if (!fileLines) return;
+
+    const actualLine = fileLines[dl.lineNo - 1];
+    if (!actualLine) return;
+
+    const items = [...actualLine.matchAll(/[a-zA-Z_$][a-zA-Z0-9_$]*/g)].map((m) => m[0]);
+    if (items.length === 0) return;
+
+    if (items.length === 1) {
+      this.jumpToDefinition(items[0]);
+      return;
+    }
+
+    this.pickerMode = true;
+    this.pickerItems = items;
+    this.pickerIndex = 0;
+    this.invalidate();
+  }
+
+  private jumpToDefinition(symbol: string): void {
+    const f = this.activeFile();
+    if (!f || f.isBinary || !this.overlay || !this.lsp) return;
+
+    const view = this.fileViews.get(f.path);
+    if (!view) return;
+
+    const dl = view[this.fileLineOffset];
+    if (!dl || !dl.lineNo) return;
+
+    const fileLines = readFileLines(f.path, this.repoDir);
+    if (!fileLines) return;
+
+    const actualLine = fileLines[dl.lineNo - 1];
+    if (!actualLine) return;
+
+    const idx = actualLine.indexOf(symbol);
+    if (idx === -1) return;
+
+    const uri = `file://${join(this.repoDir, f.path)}`;
+    this.lsp.openDocument(uri, fileLines.join("\n"));
+    this.overlay.push(uri, dl.lineNo - 1, idx);
+  }
+
   private enterCommentMode(): void {
     this.commentInput = "";
     this.mode = "comment";
@@ -888,6 +973,9 @@ class DiffReviewPanel {
   }
 
   render(width: number): string[] {
+    if (this.overlay?.active) {
+      return this.overlay.render(width);
+    }
     if (this.cachedLines.length > 0 && this.cachedWidth === width) {
       return this.cachedLines;
     }
@@ -1077,7 +1165,16 @@ class DiffReviewPanel {
       while (lines.length - previewStart < previewRows) add(" " + th.fg("dim", "~"));
     };
 
-    if (f.isBinary) {
+    if (this.pickerMode) {
+      add(" " + th.fg("accent", "Select symbol to jump to definition:"));
+      for (let i = 0; i < this.pickerItems.length; i++) {
+        const arrow = i === this.pickerIndex ? th.fg("accent", "►") : " ";
+        const item = this.pickerItems[i]!;
+        const styled = i === this.pickerIndex ? th.bold(th.fg("text", item)) : th.fg("text", item);
+        add(`  ${arrow} ${styled}`);
+      }
+      padPreview();
+    } else if (f.isBinary) {
       add(" " + th.fg("muted", "Binary file — cannot display diff"));
       padPreview();
     } else if (view && view.length > 0) {
@@ -1154,12 +1251,16 @@ class DiffReviewPanel {
     // ── Help bar ─────────────────────────────────────────
     if (this.mode === "comment") {
       add(" " + th.fg("dim", "[Enter] save  [Esc] cancel"));
+    } else if (this.pickerMode) {
+      add(" " + th.fg("dim", "[↑↓/j/k] navigate  [Enter] jump  [Esc] cancel"));
     } else {
+      const lspHint = this.lsp ? `  [→] goto ${this.definitionTarget()}` : "";
       add(
         " " +
           th.fg(
             "dim",
-            "[Tab] file  [j/k] hunk  [↑↓/PgUp/PgDn] scroll  [Space] ✓  [c] comment  [C] compile  [v] mode  [/] search  [r] reset  [Esc] close",
+            "[Tab] file  [j/k] hunk  [↑↓/PgUp/PgDn] scroll  [Space] ✓  [c] comment  [C] compile  [v] mode  [/] search  [r] reset  [Esc] close" +
+              lspHint,
           ),
       );
     }
@@ -1183,6 +1284,36 @@ class DiffReviewPanel {
       return;
     }
 
+    // Picker mode — inline symbol selection for go-to-definition
+    if (this.pickerMode) {
+      if (matchesKey(data, Key.escape)) {
+        this.pickerMode = false;
+        this.pickerItems = [];
+        this.invalidate();
+        return;
+      }
+      if (data === "j" || matchesKey(data, Key.down)) {
+        this.pickerIndex = (this.pickerIndex + 1) % this.pickerItems.length;
+        this.invalidate();
+        return;
+      }
+      if (data === "k" || matchesKey(data, Key.up)) {
+        this.pickerIndex = (this.pickerIndex - 1 + this.pickerItems.length) % this.pickerItems.length;
+        this.invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.enter)) {
+        const symbol = this.pickerItems[this.pickerIndex];
+        if (symbol) {
+          this.pickerMode = false;
+          this.pickerItems = [];
+          this.jumpToDefinition(symbol);
+        }
+        return;
+      }
+      return;
+    }
+
     if (this.mode === "compile") {
       if (data === "c" || matchesKey(data, Key.escape)) {
         this.exitCompileView();
@@ -1196,6 +1327,57 @@ class DiffReviewPanel {
         this.deleteActiveCompileComment();
       }
       return;
+    }
+
+    // LSP definition overlay navigation
+    if (this.overlay?.active) {
+      if (this.overlay.pickerMode) {
+        if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
+          this.overlay.cancelPicker();
+          return;
+        }
+        if (data === "j" || matchesKey(data, Key.down)) {
+          this.overlay.navigatePicker(1);
+          return;
+        }
+        if (data === "k" || matchesKey(data, Key.up)) {
+          this.overlay.navigatePicker(-1);
+          return;
+        }
+        if (matchesKey(data, Key.enter) || matchesKey(data, Key.right)) {
+          this.overlay.selectPicker();
+          return;
+        }
+        return;
+      }
+      if (matchesKey(data, Key.left)) {
+        if (!this.overlay.pop()) this.invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.right)) {
+        this.overlay.diveDeeper();
+        return;
+      }
+      if (matchesKey(data, Key.up)) {
+        this.overlay.scroll(-1);
+        return;
+      }
+      if (matchesKey(data, Key.down)) {
+        this.overlay.scroll(1);
+        return;
+      }
+      if (matchesKey(data, Key.pageUp)) {
+        this.overlay.scroll(-10);
+        return;
+      }
+      if (matchesKey(data, Key.pageDown)) {
+        this.overlay.scroll(10);
+        return;
+      }
+      if (matchesKey(data, Key.escape)) {
+        this.overlay.clear();
+        return;
+      }
     }
 
     if (this.mode === "comment") {
@@ -1297,6 +1479,12 @@ class DiffReviewPanel {
       return;
     }
 
+    // LSP go-to-definition (diff view only)
+    if (this.lsp && matchesKey(data, Key.right)) {
+      this.enterPickerMode();
+      return;
+    }
+
     // Actions
     if (data === " " || matchesKey(data, Key.space)) {
       this.toggleReviewed();
@@ -1385,9 +1573,14 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
         return;
       }
 
+      // Check for --lsp flag
+      const rawArgs = (args || "").trim();
+      const useLsp = rawArgs.includes("--lsp");
+      const cleanArgs = rawArgs.replace(/--lsp/g, "").trim();
+
       // Preferred syntax: "<repo-path> <diff-target>".
       // Legacy "<diff-target> @<repo-path>" is still accepted.
-      const { target, repoPath } = parseCommandArgs((args || "").trim(), ctx.cwd);
+      const { target, repoPath } = parseCommandArgs(cleanArgs, ctx.cwd);
 
       // Validate git repo and normalize to the reviewed repo root.
       const requestedRepoDir = repoPath || ctx.cwd;
@@ -1405,6 +1598,18 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
       const slug = slugify(diffTarget);
       const state = loadState(slug, repoDir);
 
+      // Start LSP client if requested
+      let lsp: LspClient | undefined;
+      if (useLsp) {
+        lsp = new LspClient();
+        try {
+          await lsp.start(repoDir);
+        } catch (e) {
+          ctx.ui.notify(`LSP failed to start: ${(e as Error).message}`, "error");
+          lsp = undefined;
+        }
+      }
+
       // Open overlay IMMEDIATELY with loading state, then stream results in
       const result = await ctx.ui.custom<ReviewResult | null>(
         (tui, theme, _kb, done) => {
@@ -1419,6 +1624,7 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
             theme,
             tui,
             done,
+            lsp,
           });
           panel.setLoading(true);
 
@@ -1551,6 +1757,11 @@ export default function diffReviewExtension(pi: ExtensionAPI) {
           },
         },
       );
+
+      // Shutdown LSP client after overlay closes
+      if (lsp) {
+        await lsp.shutdown();
+      }
 
       if (!result) {
         // User closed with Esc — state was already saved (Escape handler calls persistState)
